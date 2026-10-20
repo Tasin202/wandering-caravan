@@ -5,6 +5,9 @@ on:
     branches: [ main, master ]
   workflow_dispatch:
 
+permissions:
+  contents: write
+
 jobs:
   build:
     runs-on: ubuntu-latest
@@ -24,6 +27,11 @@ jobs:
           echo "PROJ=$PROJ" >> "$GITHUB_ENV"
           echo "Project folder: $PROJ"
           ls -la "$PROJ"
+
+      - name: Write build info (used by the in-game update checker)
+        run: |
+          printf 'extends RefCounted\nconst BUILD = %s\nconst REPO = "%s"\nconst NAME = "v%s"\n' "${{ github.run_number }}" "${{ github.repository }}" "${{ github.run_number }}" > "$PROJ/build_info.gd"
+          cat "$PROJ/build_info.gd"
 
       - name: Set up Java 17
         uses: actions/setup-java@v4
@@ -50,11 +58,16 @@ jobs:
           unzip -q "Godot_v${GODOT_VERSION}-stable_export_templates.tpz" -d tpl
           mv tpl/templates "$HOME/.local/share/godot/export_templates/${GODOT_VERSION}.stable"
 
-      - name: Configure Godot for Android (debug keystore)
+      - name: Configure Godot for Android (permanent signing key)
         run: |
-          keytool -keyalg RSA -genkeypair -alias androiddebugkey -keypass android \
-            -keystore "$HOME/debug.keystore" -storepass android \
-            -dname "CN=Android Debug,O=Android,C=US" -validity 9999 -deststoretype pkcs12
+          if [ -f "$PROJ/signing/debug.keystore" ]; then
+            cp "$PROJ/signing/debug.keystore" "$HOME/debug.keystore"
+            echo "Using the permanent signing key from the project"
+          else
+            keytool -keyalg RSA -genkeypair -alias androiddebugkey -keypass android \
+              -keystore "$HOME/debug.keystore" -storepass android \
+              -dname "CN=Android Debug,O=Android,C=US" -validity 9999 -deststoretype pkcs12
+          fi
           mkdir -p "$HOME/.config/godot"
           for f in editor_settings-4.tres editor_settings-4.3.tres; do
             cat > "$HOME/.config/godot/$f" <<SETTINGS
@@ -82,8 +95,20 @@ jobs:
           "$HOME/godot/godot" --headless --path "$PROJ" --export-debug "Android" "$GITHUB_WORKSPACE/build/WanderingCaravan.apk"
           ls -la "$GITHUB_WORKSPACE/build"
 
-      - name: Upload APK
+      - name: Upload APK artifact
         uses: actions/upload-artifact@v4
         with:
           name: WanderingCaravan-APK
           path: build/WanderingCaravan.apk
+
+      - name: Publish GitHub release (the game checks this for updates)
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          TAG="v${{ github.run_number }}"
+          gh release create "$TAG" build/WanderingCaravan.apk \
+            --repo "${{ github.repository }}" \
+            --target "${{ github.sha }}" \
+            --title "Wandering Caravan $TAG" \
+            --notes "Automatic build $TAG. Download WanderingCaravan.apk and install it over your old version. Your saved progress is kept." \
+            || gh release upload "$TAG" build/WanderingCaravan.apk --repo "${{ github.repository }}" --clobber
